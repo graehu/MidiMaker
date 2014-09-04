@@ -1,0 +1,559 @@
+%{
+
+int yyerror(char*);
+int yylex();
+
+#include <vector>
+#include <iostream>
+#include <stdio.h>
+using namespace std;
+
+#include "SymbolTable.hpp"
+
+#include "SequenceList.hpp"
+#include "Sequence.hpp"
+#include "Chord.hpp"
+#include "Note.hpp"
+#include "SeqSegment.hpp"
+
+#include "jdksmidi/world.h"
+#include "jdksmidi/track.h"
+#include "jdksmidi/multitrack.h"
+#include "jdksmidi/filereadmultitrack.h"
+#include "jdksmidi/fileread.h"
+#include "jdksmidi/fileshow.h"
+#include "jdksmidi/filewritemultitrack.h"
+using namespace jdksmidi;
+
+SequenceList mySequences;
+
+enum enumState
+{
+    defineState=0,
+    trackState
+
+}progState;
+
+using namespace std;
+
+
+char KeyTypes [12][2] =
+{
+	{'A',0},{'A','#'},
+	{'B',0},
+	{'C',0},{'C','#'},
+	{'D',0},{'D','#'},
+	{'E',0},
+	{'F',0},{'F','#'},
+	{'G',0},{'G','#'}
+};
+
+
+SeqSegment* memSequence(char id[32], int modifier, float length)
+{
+	SeqSegment* localMem;
+
+    int number = SymbolTable::instance().checkId(id);
+    localMem = new Sequence;
+    *((Sequence*)localMem) = *mySequences.getSequence(number);
+    (SeqSegment*)localMem->setMod(modifier);
+    (SeqSegment*)localMem->setLength(length);
+
+    return (SeqSegment*)localMem;
+
+}
+
+SeqSegment* mkMemSequence(Sequence* newSequence, int modifier, int length)
+{
+	SeqSegment* localMem;
+
+    //int number = newSequence->getSeqIdentifier();
+    localMem = new Sequence;
+    *((Sequence*)localMem) = *newSequence;
+    localMem->setMod(modifier);
+    localMem->setLength(length);
+
+    return (SeqSegment*)localMem;
+
+}
+
+
+
+Sequence* listSequence(char id[32], SeqSegment* Segment) //this is for any squence with a single segment.
+{
+	Sequence* localSeq;
+	printf("\t%s\n",id);
+
+	if(SymbolTable::instance().checkId(id) == -1) //no id allocated currently.
+	{
+
+		SymbolTable::instance().addId(id); //allocate id.
+		localSeq = new Sequence;
+		localSeq->addSeqSegment(Segment);
+		localSeq->setSeqIdentfier(SymbolTable::instance().checkId(id));//set id.
+
+		if(progState == trackState) localSeq->setType(track);
+		return localSeq;
+	}
+	else
+    {
+        printf("\nI Exist this is bad! Case: 1\n");
+    }
+
+	return 0; //this identifier exists.
+}
+
+Sequence* listSequence(char id[32], Sequence* localSeq) //this is for any sequence with multiple segments
+{
+
+    printf("\t%s\n",id);
+
+	if(SymbolTable::instance().checkId(id) == -1) //no id allocated currently.
+	{
+		SymbolTable::instance().addId(id); //allocate id.
+		localSeq->setSeqIdentfier(SymbolTable::instance().checkId(id));
+		if(progState == trackState) localSeq->setType(track);
+
+		return localSeq;
+	}
+	else
+    {
+        printf("\nI Exist this is bad! Case: 2\n");
+    }
+
+	return 0; //this identifier exists.
+}
+
+
+int convertKey(char key[32])
+{
+	if(key[0] > 96) key[0] = key[0] - 32; //make sure it's uppercase
+
+	char key2[2] = {key[0],key[1]}; //set it's only a char[2]
+
+	if(key2[0] == 'A' && key2[1] =='^'){ key2[0] = 'G'; key2[1] = '#';} //if the key is A^ convert to G#
+
+	if(key2[1] == '^') { key2[0] = char(int(key2[0])-1); key2[1] = '#';} //convert flats to sharps
+
+	for(int i = 0; i < 12; i++)
+	{
+        if(key2[0] == KeyTypes[i][0])
+        {
+            if(key2[1] == KeyTypes[i][1]) return i+1;
+
+        }//Key converted!!
+	}
+
+
+	return 0; //key not converted...
+
+}
+
+
+
+int lastMod = 0;
+int depth = 0;
+
+MIDITimedBigMessage message; // the object for individual midi events
+unsigned char chan; // internal midi channel number 0...15 (named 1...16)
+
+MIDIClockTime t; // time in midi ticks
+MIDIClockTime dt = 100; // time interval (1 second)
+int clks_per_beat = 100; // number of ticks in crotchet (1...32767)
+int gtempo = 500000;
+int numTracks = 0;
+int numSequences = 0;
+unsigned char trackID = 0;
+unsigned char instrument = 0;
+
+MIDIMultiTrack* tracks;
+bool trackOn;
+
+int reading(Sequence* localSequence)
+{
+
+    depth++;
+    int id = localSequence->getSeqIdentifier();
+    if(localSequence->getType() == track)
+    {
+        trackOn = true;
+        trackID = (unsigned char)(id-numSequences);
+        /// we change panorama in channels 0-2
+
+        message.SetControlChange ( trackID,0xA, 64); // channel 0 panorama = 0 at the left
+        tracks->GetTrack( trackID )->PutEvent( message );
+
+        /// we change musical instrument in channels 0-2
+        switch (trackID)
+        {
+            case 0:
+                instrument = (unsigned char)75;
+                break;
+            case 1:
+                instrument = (unsigned char)21;
+                break;
+            case 2:
+                instrument = (unsigned char)24;
+                break;
+            case 3:
+                instrument = (unsigned char)32;
+                break;
+            case 5:
+                instrument = (unsigned char)40;
+                break;
+            case 6:
+                instrument = (unsigned char)106;
+                break;
+            case 7:
+                instrument = (unsigned char)9;
+                break;
+        }
+
+        message.SetProgramChange( trackID, instrument ); // channel 0 instrument 19 - Church Organ
+        tracks->GetTrack( trackID )->PutEvent(message);
+    }
+
+    for(int i = 0; localSequence->getSeqSegment(i) != 0; i++)
+    {
+        //printf("Type %d:", localSequence->getSeqSegment(i)->getType());
+        segType currentType = localSequence->getSeqSegment(i)->getType();
+        int mod = 0;
+        mod = localSequence->getMod();
+        int somethingElse;
+
+        if(currentType == chord)
+        {
+            for(int z = 0; z < depth; z++){printf("\t");}
+            cout << "Chord: " << endl;
+
+            for(int ii = 0; ((Chord*)localSequence->getSeqSegment(i))->getNoteKey(ii) != 0; ii++ )
+            {
+                int key = ((Chord*)localSequence->getSeqSegment(i))->getNoteKey(ii);
+                int octave = ((Chord*)localSequence->getSeqSegment(i))->getNoteOctave(ii)+lastMod;
+                for(int z = 0; z < depth; z++){printf("\t");}
+                cout << "note" << ii << ":\t" << "key: " << KeyTypes[key-1][0] << KeyTypes[key-1][1] << "\toctave: " << octave << endl;
+
+                if(ii > 0 && trackOn)
+                {
+                    message.SetControlChange ((unsigned char)(ii), 0xA, 64 );
+                    tracks->GetTrack(trackID )->PutEvent( message );
+
+                    message.SetProgramChange((unsigned char)(ii), instrument);
+                    tracks->GetTrack( trackID )->PutEvent(message);
+
+                    message.SetTime(t);
+                    message.SetNoteOn((unsigned char)(ii), key+(octave*12)-1, (unsigned char)120 );
+                    tracks->GetTrack(trackID)->PutEvent(message);
+
+                }
+                else if (trackOn)
+                {
+                    message.SetTime(t);
+                    message.SetNoteOn(trackID, (unsigned char)(key+(octave*12)-1), (unsigned char)120 );
+                    tracks->GetTrack(trackID)->PutEvent(message);
+                }
+
+            }
+            for(int ii = 0; ((Chord*)localSequence->getSeqSegment(i))->getNoteKey(ii) != 0; ii++ )
+            {
+                int key = ((Chord*)localSequence->getSeqSegment(i))->getNoteKey(ii);
+                int octave = ((Chord*)localSequence->getSeqSegment(i))->getNoteOctave(ii)+lastMod;
+
+                if(ii > 0 && trackOn)
+                {
+                    message.SetTime(t);
+                    message.SetNoteOff((unsigned char)ii, (unsigned char)(key+(octave*12)-1), (unsigned char)120);
+                    tracks->GetTrack(trackID)->PutEvent(message);
+
+                }
+                else if (trackOn)
+                {
+                   message.SetTime(t += (dt*(localSequence->getLength())));
+                   message.SetNoteOff(trackID, (unsigned char)(key+(octave*12)-1), (unsigned char)120);
+
+                    tracks->GetTrack(trackID)->PutEvent(message);
+                }
+
+
+            }
+
+        }
+        if(currentType == note)
+        {
+            int key = ((Note*)localSequence->getSeqSegment(i))->getKey();
+            int octave = ((Note*)localSequence->getSeqSegment(i))->getOctave()+lastMod;
+            for(int z = 0; z < depth; z++){printf("\t");}
+            cout << "note:" << "\tkey: " << KeyTypes[key-1][0] << KeyTypes[key-1][1] <<  "\toctave: " << octave << endl;
+
+            if(trackOn)
+            {
+
+
+                message.SetTime(t);
+                message.SetNoteOn(trackID, key+(octave*12)-1, (unsigned char)120 );
+                tracks->GetTrack( trackID)->PutEvent( message );
+
+                float lengthy = localSequence->getLength();
+                message.SetTime( t += (dt*((Note*)localSequence->getSeqSegment(i))->getLength()));
+                message.SetNoteOff(trackID, key+(octave*12)-1, (unsigned char)120 );
+
+                tracks->GetTrack(trackID)->PutEvent(message);
+            }
+
+        }
+        if(currentType == tempo)
+        {
+            int newTempo = localSequence->getSeqSegment(i)->getTempo();
+            for(int z = 0; z < depth; z++){printf("\t");}
+            if(trackOn)
+            {
+                gtempo = (1000000*(60.0/newTempo));
+                message.SetTempo(gtempo);
+                tracks->GetTrack(trackID)->PutEvent(message);
+            }
+            cout <<  "tempo: " <<  newTempo << " bpm\n" << endl;
+        }
+        if(currentType == rest)
+        {
+            int resting = localSequence->getSeqSegment(i)->getLength();
+            if(trackOn)
+            {
+               t += dt*localSequence->getSeqSegment(i)->getLength();
+            }
+            for(int z = 0; z < depth; z++){printf("\t");}
+            cout << "rest: " << resting << " beats\n" << endl;
+        }
+
+        if(currentType == sequence)
+        {
+            int id =
+            ((Sequence*)(localSequence->getSeqSegment(i)))->getSeqIdentifier();
+            for(int z = 0; z < depth; z++){printf("\t");}
+            cout << "Entering Sequence: \""<< SymbolTable::instance().getId(id)<<"\"\n" << endl;
+            Sequence* newSeq = (Sequence*)localSequence->getSeqSegment(i);
+
+            lastMod = mod;
+
+            reading(newSeq);
+        }
+
+        if(currentType == track)
+        {
+            int id =
+            ((Sequence*)(localSequence->getSeqSegment(i)))->getSeqIdentifier();
+            for(int z = 0; z < depth; z++){printf("\t");}
+            cout << "Entering Track: \""<< SymbolTable::instance().getId(id)<<"\"\n" << endl;
+            Sequence* newSeq = (Sequence*)localSequence->getSeqSegment(i);
+
+            lastMod = mod;
+
+            reading(newSeq);
+        }
+
+
+    }
+    depth--;
+    id = localSequence->getSeqIdentifier();
+    printf("\n");
+    for(int z = 0; z < depth; z++){printf("\t");}
+    if (localSequence->getType() == track)
+    {
+        cout << "Leaving Track: \""<< SymbolTable::instance().getId(id)<<"\"\n" << endl;
+    }
+    else
+        cout << "Leaving Sequence: \""<< SymbolTable::instance().getId(id)<<"\"\n" << endl;
+    lastMod = 0;
+    return 0;
+}
+
+int endgame (void)
+{
+    int i = 0;
+    int ii = 0;
+
+
+    cout << "i'm in the end game" << endl;
+    numSequences = 0;
+    numTracks = 0;
+
+    while(mySequences.getSequence(ii) != 0)
+    {
+        if(mySequences.getSequence(ii)->getType() == track) numTracks++;
+        if(mySequences.getSequence(ii)->getType() == sequence) numSequences++;
+        ii++;
+    }
+
+    MIDIMultiTrack tempTracks(numTracks);
+    tracks = &tempTracks;
+    tracks->SetClksPerBeat(clks_per_beat);
+    t = 0;
+    message.SetTime(t);
+    message.SetTimeSig(4, 2);
+    tracks->GetTrack(0)->PutEvent(message);
+    message.SetTempo(gtempo);
+    tracks->GetTrack(0)->PutEvent(message);
+    tracks->GetTrack(0)->PutTextEvent(t, META_TRACK_NAME, "Music made with Graham Hughes tools project");
+
+    while(mySequences.getSequence(i) != 0)
+    {
+        int id = (mySequences.getSequence(i))->getSeqIdentifier();
+
+        if (mySequences.getSequence(i)->getType() == track)
+        {
+            trackID = (unsigned char)(id-numSequences);
+            cout << "\nEntering Track"<< i <<": \"" << SymbolTable::instance().getId(id) << "\"\n" << endl;
+            tracks->GetTrack(trackID)->PutTextEvent(t,
+                                                                             META_TRACK_NAME,
+                                                                             SymbolTable::instance().getId(id));
+        }
+        else
+            cout << "\nEntering Sequence"<< i <<": \"" << SymbolTable::instance().getId(id) << "\"\n" << endl;
+
+
+        reading(mySequences.getSequence(i));
+
+        if (mySequences.getSequence(i)->getType() == track)
+            tracks->GetTrack(trackID)->RemoveIdenticalEvents();
+
+        trackOn = false;
+        t = 0;
+        i++;
+    }
+
+    /*message.SetTime(t);
+    message.SetNoteOn((unsigned char)0,(unsigned char)54, (unsigned char)120 );
+    tracks->GetTrack(  (unsigned char)0 )->PutEvent( message );
+
+    message.SetTime( t += dt*4);
+    message.SetNoteOff( (unsigned char)0,(unsigned char)54, (unsigned char)120 );
+
+    tracks->GetTrack((unsigned char)0)->PutEvent(message);
+    */
+
+    tracks->SortEventsOrder(); // it is absolutely necessary!
+
+    const char *outfile_name = "script_midifile.mid";
+    MIDIFileWriteStreamFileName out_stream( outfile_name );
+
+
+    if( out_stream.IsValid() )
+    {
+        // the object which takes the midi tracks and writes the midifile to the output stream
+        MIDIFileWriteMultiTrack writer(tracks, &out_stream);
+
+        // write the output file
+        if ( writer.Write( numTracks ) )
+        {
+            cout << "\nOK writing file " << outfile_name << endl;
+        }
+        else
+        {
+            cerr << "\nError writing file " << outfile_name << endl;
+        }
+    }
+    else
+    {
+        cerr << "\nError opening file " << outfile_name << endl;
+    }
+
+    getchar();
+
+    return 0;
+}
+
+
+
+
+%}
+//%expect 8//this is only if the mkSeqInSeq functionality is added
+%union
+{
+char string[32];
+float fix_4;
+int s_int;
+unsigned u_int;
+class Note* note;
+vector<class Note>* notes;
+class Chord* chord;
+class SeqSegment* segment;
+class Sequence* sequence;
+class SequenceList* sequences;
+}
+%token <string> NOTE
+%token <fix_4> FIXED_DECIMAL
+%token <u_int> NUMBER
+%token <s_int> SIGNED_NUMBER
+%token <string> IDENTIFIER
+%token COLON_COLON TEMPO REST
+
+%type <fix_4> Length
+%type <s_int> Modifier
+%type <note> Note
+%type <notes> Notes
+%type <chord> Chord
+%type <segment> Segment
+%type <sequence> Segments
+%type <sequence> Sequence
+%type <sequences> Sequences
+
+
+%%
+Input:
+    Tracks {endgame();cout << "Input" << endl;}
+    ;
+Tracks:
+    Defines Sequences {cout<<"Tracks" << endl;}
+    ;
+
+Defines:
+	COLON_COLON Sequences COLON_COLON { cout<<"Defines" << endl; progState = trackState;}// mySequences = *$2; }
+	;
+
+Sequences: //multiple
+	Sequence {cout<<"seqs2" << endl; mySequences.addSequence($1);}						//i don't think this is do nothing hahaha
+	| Sequences Sequence {cout<<"seqs2" << endl; mySequences.addSequence($2); $$ = $1}			//same
+	;
+
+Sequence: //singular
+	IDENTIFIER '{' Segments '}' {cout<<"seq1" << endl; $$ = listSequence($1,$3);}			// Allocates a sequence,names it, adds the list, add to symbol table and return it
+	| IDENTIFIER Segment {cout<<"seq2" << endl; $$ = listSequence($1,$2);}				// Allocates a sequence, add the single member to it, name it, add to symbol table and return it
+	;
+
+Segments: //multiple
+	Segment	{cout<<"segs1" << endl; $$ = new Sequence; $$->addSeqSegment($1);}			// Allocates a sequence, doesn't name it, adds the member, returns it
+	| Segments ',' Segment {cout<<"segs2" << endl; $1->addSeqSegment($3); $$ = $1;}		// Adds the member to the sequence, returns it
+	;
+
+Segment://singular
+	Note Length 	{cout<<"noteInSeg" << endl; $$ = new SeqSegment; $$ = $1; $$->setLength($2); }	// Allocate a note (char[3] key, int octave) contents of this constructor will be long and a bitch
+	| Chord Length  {cout<<"chrdInSeg" << endl; $$ = new SeqSegment; $$ = $1; $$->setLength($2);}
+	//| Sequence Modifier Length {cout<<"mkSeqInSeg" << endl; $$ = (SeqSegment*)mkMemSequence($1,$2,$3);} // This is optional functionality that's a little buggy. so i took it out.
+	| IDENTIFIER Modifier Length {cout<<"seqInSeg" << endl; $$ = memSequence($1,$2,$3); } // Look up symbol table, allocate a SequenceUser (Sequence*,int mod, int len)
+	| TEMPO '(' NUMBER ')' {cout<<"tempo" << endl;$$ = new SeqSegment; $$->setTempo($3); $$->setType(tempo);}				// Allocate a tempochange (int)
+	| REST Length {cout<<"rest" << endl;$$ = new SeqSegment; $$->setLength($2); $$->setType(rest);}				// Allocate a pause length.
+	;
+
+Modifier:
+	{cout<<"mod1" << endl; $$ = 0;}/* Empty line - defaults to 0 */
+	| SIGNED_NUMBER  {cout<<"mod2" << endl; $$ = $1;}/* Just return the value */
+	;
+
+Length:
+	/* Emptyline - defaults to 1 */{cout<<"length1" << endl;$$ = 1;}
+	| '(' FIXED_DECIMAL ')' {cout<<"length2" << endl; $$ = $2;}						// Just return the value
+	| '(' NUMBER ')' {cout<<"length3" << endl; $$ = $2;}
+	;
+Note: //singular
+	NOTE  {cout<<"note1" << endl; $$ = new Note; $$->setKey(convertKey($1)); $$->setOctave(4);}// $$.key = ; $$.octave = 4;}				// Allocate a Note - octave defaults to 4 (Sequence*,int(which is 4))
+	| NOTE NUMBER {cout<<"note2" << endl;$$ = new Note; $$->setKey(convertKey($1)); $$->setOctave($2);}// $$.key = convertKey($1); $$.octave = $2; } 		// Allocate a Note (Sequence*,int)
+	;
+
+Notes: //multiple
+    Note {cout<<"notes1" << endl; $$ = new vector<Note>; $$->push_back(*$1);}//$$ = new vector<Note>; $$->push_back($1);}			// Create a vector, add the note and return it
+	|Notes ',' Note {cout<<"notes2" << endl;$1->push_back(*$3); $$ = $1;}// $1->push_back($3); $$ = $1; }					// Add the note to the vector and return it
+	;
+
+Chord:  //multiple notes
+	'[' Notes ']' 	{cout<<"chord" << endl;$$ = new Chord; for(int i=0;i < $2->size();i++) $$->addNote((*($2))[i]); }//$$ = $2;}	// Allocate a chord and add the vector
+	;
+%%
